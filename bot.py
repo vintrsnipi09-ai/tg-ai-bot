@@ -231,8 +231,8 @@ DATABASE = "applications.db"
 
 logging.basicConfig(level=logging.INFO)
 
-session = AiohttpSession(proxy="http://proxy.server:3128")
-bot = Bot(token=BOT_TOKEN, session=session)
+
+bot = Bot(token=BOT_TOKEN)
 
 dp = Dispatcher()
 
