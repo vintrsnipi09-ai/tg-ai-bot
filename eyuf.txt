@@ -1,0 +1,457 @@
+import asyncio
+import logging
+import aiosqlite
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    Message,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+)
+
+# ============================================================
+# 1. НАСТРОЙКИ И ИНИЦИАЛИЗАЦИЯ
+# ============================================================
+
+BOT_TOKEN = "8946151948:AAG_RhZv-UOpHp5xi7vF5MN35GyCP-QIaj8"
+
+ADMIN_IDS = {
+    5039871861,
+7678209331,
+}
+
+DATABASE = "applications.db"
+
+
+# ============================================================
+# 2. СОСТОЯНИЯ
+# ============================================================
+
+class ApplicationForm(StatesGroup):
+    waiting_for_submission = State()
+
+
+class AdminStates(StatesGroup):
+    waiting_for_file = State()
+
+
+# ============================================================
+# 3. ЗАПУСК
+# ============================================================
+
+logging.basicConfig(level=logging.INFO)
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+
+# ============================================================
+# 4. DATABASE
+# ============================================================
+
+async def init_db():
+    async with aiosqlite.connect(DATABASE) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS applications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                username TEXT,
+                full_name TEXT NOT NULL,
+                passport TEXT NOT NULL,
+                student_id TEXT NOT NULL,
+                date_of_birth TEXT NOT NULL,
+                university TEXT NOT NULL,
+                program_major TEXT NOT NULL,
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                mode_of_study TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.commit()
+
+
+async def save_application(user_id, username, data):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("""
+            INSERT INTO applications (
+                telegram_id,
+                username,
+                full_name,
+                passport,
+                student_id,
+                date_of_birth,
+                university,
+                program_major,
+                start_date,
+                end_date,
+                mode_of_study
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id,
+            username,
+            data["full_name"],
+            data["passport"],
+            data["student_id"],
+            data["date_of_birth"],
+            data["university"],
+            data["program_major"],
+            data["start_date"],
+            data["end_date"],
+            data["mode_of_study"],
+        ))
+
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_application(application_id):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("""
+            SELECT telegram_id, full_name
+            FROM applications
+            WHERE id = ?
+        """, (application_id,))
+
+        return await cursor.fetchone()
+
+
+# ============================================================
+# 4b. ШАБЛОН АНКЕТЫ И ПАРСИНГ
+# ============================================================
+
+# Порядок и внутренние имена полей
+FIELD_ORDER = [
+    "full_name",
+    "passport",
+    "student_id",
+    "date_of_birth",
+    "university",
+    "program_major",
+    "start_date",
+    "end_date",
+    "mode_of_study",
+]
+
+# Как поле называется для пользователя
+FIELD_LABELS = {
+    "full_name": "Full Name",
+    "passport": "Passport",
+    "student_id": "Student ID",
+    "date_of_birth": "Date of birth",
+    "university": "University",
+    "program_major": "Program and Major",
+    "start_date": "Start date",
+    "end_date": "End date",
+    "mode_of_study": "Mode of study",
+}
+
+# Обратный словарь: нормализованная метка -> внутреннее имя поля
+LABEL_TO_FIELD = {
+    label.strip().lower(): field
+    for field, label in FIELD_LABELS.items()
+}
+
+
+def application_template() -> str:
+    lines = "\n".join(f"{FIELD_LABELS[f]}: " for f in FIELD_ORDER)
+    return f"<pre>{lines}</pre>"
+
+
+def parse_application(text: str):
+    """
+    Разбирает сообщение пользователя вида:
+        Full Name: John Smith
+        Passport: AB1234567
+        ...
+    Возвращает (data, missing), где data - словарь заполненных полей,
+    missing - список внутренних имён незаполненных/отсутствующих полей.
+    """
+    data = {}
+
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+
+        label, _, value = line.partition(":")
+        label_norm = label.strip().lower()
+        value = value.strip()
+
+        field = LABEL_TO_FIELD.get(label_norm)
+        if field and value:
+            data[field] = value
+
+    missing = [f for f in FIELD_ORDER if f not in data]
+    return data, missing
+
+
+# ============================================================
+# 5. КНОПКИ
+# ============================================================
+
+def start_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📝 Заполнить анкету")]
+        ],
+        resize_keyboard=True
+    )
+
+
+def admin_keyboard(application_id):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📄 Отправить файл",
+                    callback_data=f"sendfile:{application_id}"
+                )
+            ]
+        ]
+    )
+
+
+# ============================================================
+# 6. /START
+# ============================================================
+
+@dp.message(Command("start"))
+async def start(message: Message, state: FSMContext):
+    await state.clear()
+
+    await message.answer(
+        "Здравствуйте! Это бот <b>EYUF</b>.\n\n"
+        "Для заполнения анкеты нажмите кнопку ниже.",
+        reply_markup=start_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
+# 7. НАЧАЛО АНКЕТЫ — ПОКАЗЫВАЕМ ШАБЛОН
+# ============================================================
+
+@dp.message(F.text == "📝 Заполнить анкету")
+async def start_application(message: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(ApplicationForm.waiting_for_submission)
+
+    await message.answer(
+        "Скопируйте шаблон ниже (нажмите на него, чтобы скопировать), "
+        "заполните все пункты после двоеточия и отправьте "
+        "<b>одним сообщением</b>:\n\n"
+        f"{application_template()}\n\n"
+        "Пример заполненной строки:\n"
+        "<code>Full Name: John Michael Smith</code>",
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
+# 8. ПОЛЬЗОВАТЕЛЬ ПРИСЛАЛ ЗАПОЛНЕННУЮ АНКЕТУ ОДНИМ СООБЩЕНИЕМ
+# ============================================================
+
+@dp.message(ApplicationForm.waiting_for_submission)
+async def process_application(message: Message, state: FSMContext):
+    if not message.text:
+        await message.answer(
+            "Пожалуйста, отправьте анкету текстом, используя шаблон выше."
+        )
+        return
+
+    data, missing = parse_application(message.text)
+
+    if missing:
+        missing_text = "\n".join(f"• {FIELD_LABELS[f]}" for f in missing)
+
+        await message.answer(
+            "❗ Не все пункты заполнены. Не хватает:\n\n"
+            f"{missing_text}\n\n"
+            "Скопируйте шаблон заново, заполните все пункты после "
+            "двоеточия и отправьте одним сообщением:\n\n"
+            f"{application_template()}",
+            parse_mode="HTML"
+        )
+        return
+
+    user_id = message.from_user.id
+    username = message.from_user.username
+
+    application_id = await save_application(
+        user_id,
+        username,
+        data
+    )
+
+    await message.answer(
+        "✅ <b>Анкета успешно отправлена!</b>\n\n"
+        "Администратор проверит ваши данные. "
+        "После проверки файл будет отправлен вам через этого бота.",
+        parse_mode="HTML"
+    )
+
+    username_text = f"@{username}" if username else "нет username"
+
+    admin_text = (
+        "📥 <b>НОВАЯ АНКЕТА</b>\n\n"
+        f"🆔 Application ID: <code>{application_id}</code>\n"
+        f"👤 Telegram ID: <code>{user_id}</code>\n"
+        f"🔗 Username: {username_text}\n\n"
+        f"<b>Full Name:</b> {data['full_name']}\n"
+        f"<b>Passport:</b> {data['passport']}\n"
+        f"<b>Student ID:</b> {data['student_id']}\n"
+        f"<b>Date of birth:</b> {data['date_of_birth']}\n"
+        f"<b>University:</b> {data['university']}\n"
+        f"<b>Program and Major:</b> {data['program_major']}\n"
+        f"<b>Start date:</b> {data['start_date']}\n"
+        f"<b>End date:</b> {data['end_date']}\n"
+        f"<b>Mode of study:</b> {data['mode_of_study']}"
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=admin_text,
+                parse_mode="HTML",
+                reply_markup=admin_keyboard(application_id)
+            )
+        except Exception as e:
+            logging.error(
+                "Ошибка отправки админу %s: %s",
+                admin_id,
+                e
+            )
+
+    await state.clear()
+
+
+# ============================================================
+# 9. АДМИН НАЖАЛ "ОТПРАВИТЬ ФАЙЛ"
+# ============================================================
+
+@dp.callback_query(F.data.startswith("sendfile:"))
+async def admin_send_file(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer(
+            "У вас нет доступа.",
+            show_alert=True
+        )
+        return
+
+    application_id = int(callback.data.split(":")[1])
+    application = await get_application(application_id)
+
+    if application is None:
+        await callback.answer(
+            "Анкета не найдена.",
+            show_alert=True
+        )
+        return
+
+    telegram_id, full_name = application
+
+    await state.update_data(
+        target_user_id=telegram_id,
+        application_id=application_id,
+        target_name=full_name
+    )
+
+    await state.set_state(AdminStates.waiting_for_file)
+
+    await callback.message.answer(
+        f"📎 Теперь отправьте <b>файл</b> сюда.\n\n"
+        f"Получатель: <b>{full_name}</b>\n"
+        f"Telegram ID: <code>{telegram_id}</code>\n\n"
+        f"Для отмены: /cancel",
+        parse_mode="HTML"
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# 10. АДМИН ОТПРАВЛЯЕТ ФАЙЛ
+# ============================================================
+
+@dp.message(
+    StateFilter(AdminStates.waiting_for_file),
+    F.document
+)
+async def receive_file(
+    message: Message,
+    state: FSMContext
+):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    data = await state.get_data()
+    target_user_id = data["target_user_id"]
+
+    try:
+        await bot.send_document(
+            chat_id=target_user_id,
+            document=message.document.file_id,
+            caption=(
+                "📄 <b>Ваш документ</b>\n\n"
+                "Документ был отправлен администратором."
+            ),
+            parse_mode="HTML"
+        )
+
+        await message.answer(
+            "✅ Файл успешно отправлен пользователю."
+        )
+
+    except Exception as e:
+        logging.error(
+            "Ошибка отправки файла: %s",
+            e
+        )
+
+        await message.answer(
+            "❌ Не удалось отправить файл пользователю."
+        )
+
+    await state.clear()
+
+
+# ============================================================
+# 11. ОТМЕНА
+# ============================================================
+
+@dp.message(Command("cancel"))
+async def cancel(message: Message, state: FSMContext):
+    await state.clear()
+
+    await message.answer(
+        "Операция отменена."
+    )
+
+
+# ============================================================
+# 12. MAIN
+# ============================================================
+
+async def main():
+    await init_db()
+
+    print("======================================")
+    print("BOT STARTED SUCCESSFULLY")
+    print("======================================")
+
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

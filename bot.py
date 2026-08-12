@@ -1,460 +1,935 @@
-# -*- coding: utf-8 -*-
-import asyncio, base64, logging, os, sqlite3, tempfile
-from io import BytesIO
-import httpx
-from dotenv import load_dotenv
-from openai import OpenAI
-from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import CommandStart, Command
+import asyncio
+import logging
+import aiosqlite
+
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery,
+    Message,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
 )
-from aiogram.types.input_file import BufferedInputFile
 
-load_dotenv()
-BOT_TOKEN         = os.getenv('BOT_TOKEN', '').strip()
-OPENAI_API_KEY    = os.getenv('OPENAI_API_KEY', '').strip()
-REPLICATE_API_KEY = os.getenv('REPLICATE_API_KEY', '').strip()
-COST_IMAGE_GEN    = int(os.getenv('COST_IMAGE_GEN', '5'))
-COST_IMAGE_EDIT   = int(os.getenv('COST_IMAGE_EDIT', '5'))
-COST_VIDEO        = int(os.getenv('COST_VIDEO', '30'))
-IMAGE_MODEL       = os.getenv('IMAGE_MODEL', 'gpt-image-1').strip()
-IMAGE_SIZE        = os.getenv('IMAGE_SIZE', '1024x1024').strip()
-VIDEO_ENABLED     = os.getenv('VIDEO_ENABLED', '0').strip() == '1'
-if not BOT_TOKEN: raise RuntimeError('BOT_TOKEN is empty')
-if not OPENAI_API_KEY: raise RuntimeError('OPENAI_API_KEY is empty')
+# ============================================================
+# 0. LOCALES
+# ============================================================
 
-T = {
+LOCALES = {
     "ru": {
-        "welcome": "🤖 Привет! Я — AI-бот для создания изображений и видео.\n\n🎨 Что я умею:\n• Генерировать изображение по описанию\n• Редактировать твоё фото (фон, объекты, стиль)\n• Дорабатывать последнюю картинку ещё раз\n• Создавать короткое видео (5 сек, 1080p)\n\n💰 Цены:\n• 🎨 1 рисунок = 5 кредитов\n• 🖼 1 редактирование = 5 кредитов\n• 🎬 1 видео = 30 кредитов\n\n⭐ Пакеты звёзд:\n• 50 ⭐ → 10 кр. (2 рисунка)\n• 100 ⭐ → 20 кр. (4 рисунка)\n• 150 ⭐ → 30 кр. (1 видео)\n\n💳 Купить звёзды: @litencyy",
-        "choose_lang": "Выбери язык / Tilni tanlang:",
-        "menu": "✅ Меню открыто.",
-        "balance": "💳 Баланс: {credits} кредит(ов).",
-        "not_enough": "⚠️ Недостаточно кредитов!\n💳 Баланс: {have} кр., нужно: {need} кр.\n\n💰 Пакеты:\n• 50 ⭐ → 10 кр.\n• 100 ⭐ → 20 кр.\n• 150 ⭐ → 30 кр.\n\n⭐ Пополни у @litencyy ↓",
-        "buy": "⭐ Купить кредиты",
-        "help": "ℹ️ Как пользоваться:\n\n🎨 Генерация — опиши что создать (5 кр.)\n  Пример: красивый закат над горами\n\n🖼 Редактирование — фото + что изменить (5 кр.)\n  Пример: сделай фон космосом\n\n🔄 Повторная правка — доработать последнюю картинку (5 кр.)\n\n🎬 Видео — опиши сцену, получи 5-сек видео 1080p (30 кр.)\n\n⭐ Купить звёзды: @litencyy",
-        "info": "📊 О боте:\n\n🤖 Название: FotoRestavr Bot\n🔧 Технология: GPT-Image-1 + Kling AI\n🌐 Языки: Русский, Узбекский\n\n🎨 Цены:\n• Генерация — 5 кр.\n• Редактирование — 5 кр.\n• Видео (1080p, 5 сек) — 30 кр.\n\n⭐ Пакеты:\n• 50 ⭐ → 10 кр. | 100 ⭐ → 20 кр. | 150 ⭐ → 30 кр.\n\n💳 Пополнить: @litencyy",
-        "ask_gen": "✍️ Напиши, что сгенерировать.",
-        "ask_edit_photo": "📸 Отправь фото для редактирования.",
-        "ask_edit_prompt": "✍️ Напиши, что изменить на фото.",
-        "ask_reedit_prompt": "✍️ Напиши, что ещё изменить.",
-        "ask_video": "✍️ Опиши видео (5 сек, 1080p).",
-        "processing": "⏳ Делаю... это займёт 1-3 минуты.",
-        "done": "✅ Готово.",
-        "cancelled": "❌ Отменено.",
-        "no_last_image": "⚠️ Нет последней картинки.",
-        "video_disabled": "🎬 Видео не подключено.",
-        "billing_limit": "⚠️ Ошибка OpenAI: лимит биллинга.",
-        "choose_pack": "Выбери пакет:",
-        "pay_title": "Пакет кредитов",
-        "pay_desc": "Пополнение баланса бота.",
-        "paid_ok": "✅ Оплачено! +{add} кредитов. Баланс: {credits}.",
-        "unknown_text": "⭐ Пополни звёзды у @litencyy или выбери действие в меню.",
-        "lang_set": "🌐 Язык: Русский",
+        "welcome": (
+            "Здравствуйте! Это бот <b>EYUF</b>.\n\n"
+            "Выберите язык / Tilni tanlang / Select language:"
+        ),
+        "lang_selected": (
+            "Выбран русский язык 🇷🇺\n\n"
+            "Для заполнения анкеты нажмите кнопку ниже."
+        ),
+        "btn_fill": "📝 Заполнить анкету",
+        "btn_change_lang": "🌐 Сменить язык",
+        "btn_pending": "📋 Неотвеченные анкеты",
+        "fill_instructions": (
+            "Скопируйте шаблон ниже (нажмите на него, чтобы скопировать), "
+            "заполните все пункты после двоеточия и отправьте <b>одним сообщением</b>:\n\n"
+            "{template}\n\n"
+            "Пример заполненной строки:\n"
+            "<code>Full Name: John Michael Smith</code>"
+        ),
+        "not_text": "Пожалуйста, отправьте анкету текстом, используя шаблон выше.",
+        "missing_fields": (
+            "❗ Не все пункты заполнены. Не хватает:\n\n"
+            "{missing_text}\n\n"
+            "Скопируйте шаблон заново, заполните все пункты после двоеточия и отправьте одним сообщением:\n\n"
+            "{template}"
+        ),
+        "prompt_university": "🏛️ Отлично! Теперь введите <b>название университета</b> (University):",
+        "prompt_offer_letter": "📄 Пожалуйста, отправьте <b>Offer Letter</b> (файлом/документом):",
+        "not_a_document": "⚠️ Пожалуйста, отправьте файл/документ с Offer Letter.",
+        "app_submitted": (
+            "✅ <b>Анкета успешно отправлена!</b>\n\n"
+            "Пожалуйста, дождитесь ответа администратора. "
+            "Вы сможете отправлять сообщения после того, как админ ответит вам."
+        ),
+        "wait_for_admin": "⏳ Ваша анкета находится на рассмотрении. Пожалуйста, дождитесь ответа администратора.",
+        "doc_received_caption": (
+            "📄 <b>Ваш документ</b>\n\n"
+            "Документ был отправлен администратором."
+        ),
+        "msg_received_prefix": "💬 <b>Сообщение от администратора:</b>\n\n",
+        "btn_send_file": "📄 Отправить файл",
+        "btn_send_msg": "💬 Отправить сообщение",
+        "admin_prompt_file": (
+            "📎 Теперь отправьте <b>файл</b> сюда.\n\n"
+            "Получатель: <b>{name}</b>\n"
+            "Telegram ID: <code>{tg_id}</code>\n\n"
+            "Для отмены: /cancel"
+        ),
+        "admin_prompt_msg": (
+            "💬 Введите <b>текстовое сообщение</b> для пользователя.\n\n"
+            "Получатель: <b>{name}</b>\n"
+            "Telegram ID: <code>{tg_id}</code>\n\n"
+            "Для отмены: /cancel"
+        ),
+        "file_sent_success": "✅ Файл успешно отправлен пользователю.",
+        "file_sent_error": "❌ Не удалось отправить файл пользователю.",
+        "msg_sent_success": "✅ Сообщение успешно отправлено пользователю.",
+        "msg_sent_error": "❌ Не удалось отправить сообщение пользователю.",
+        "cancelled": "Операция отменена.",
+        "pending_empty": "🎉 Все анкеты обработаны! Неотвеченных нет.",
+        "pending_title": "📋 <b>Список неотвеченных анкет ({count}):</b>",
+        "app_card_title": "📥 <b>НЕОТВЕЧЕННАЯ АНКЕТА №{app_id}</b>"
     },
     "uz": {
-        "welcome": "🤖 Salom! Men — rasm va video yaratuvchi AI-bot.\n\n🎨 Nima qila olaman:\n• Tavsif bo'yicha rasm yaratish\n• Fotoni tahrirlash (fon, obyektlar, uslub)\n• Oxirgi rasmni qayta tahrirlash\n• Qisqa video yaratish (5 soniya, 1080p)\n\n💰 Narxlar:\n• 🎨 1 rasm = 5 kredit\n• 🖼 1 tahrirlash = 5 kredit\n• 🎬 1 video = 30 kredit\n\n⭐ Kredit paketlari:\n• 50 ⭐ → 10 kr. (2 ta rasm)\n• 100 ⭐ → 20 kr. (4 ta rasm)\n• 150 ⭐ → 30 kr. (1 ta video)\n\n💳 Yulduz sotib olish: @litencyy",
-        "choose_lang": "Tilni tanlang / Выбери язык:",
-        "menu": "✅ Menyu ochildi.",
-        "balance": "💳 Balans: {credits} kredit.",
-        "not_enough": "⚠️ Kredit yetarli emas!\n💳 Balans: {have} kr., kerak: {need} kr.\n\n💰 Paketlar:\n• 50 ⭐ → 10 kr.\n• 100 ⭐ → 20 kr.\n• 150 ⭐ → 30 kr.\n\n⭐ @litencyy dan sotib oling ↓",
-        "buy": "⭐ Kredit sotib olish",
-        "help": "ℹ️ Qanday ishlaydi:\n\n🎨 Generatsiya — nima yaratishni yozing (5 kr.)\n  Misol: tog'lar ustida chiroyli quyosh\n\n🖼 Tahrirlash — foto + nima o'zgartirishni yozing (5 kr.)\n  Misol: fonni kosmosga o'zgartir\n\n🔄 Qayta tahrir — oxirgi rasmni qayta ishlash (5 kr.)\n\n🎬 Video — sahnani tasvirla, 5 soniya 1080p (30 kr.)\n\n⭐ Yulduz sotib olish: @litencyy",
-        "info": "📊 Bot haqida:\n\n🤖 Nomi: FotoRestavr Bot\n🔧 Texnologiya: GPT-Image-1 + Kling AI\n🌐 Tillar: Ruscha, O'zbekcha\n\n🎨 Narxlar:\n• Rasm yaratish — 5 kr.\n• Tahrirlash — 5 kr.\n• Video (1080p, 5 soniya) — 30 kr.\n\n⭐ Paketlar:\n• 50 ⭐ → 10 kr. | 100 ⭐ → 20 kr. | 150 ⭐ → 30 kr.\n\n💳 To'ldirish: @litencyy",
-        "ask_gen": "✍️ Nima yaratishni yozing.",
-        "ask_edit_photo": "📸 Tahrirlanadigan fotoni yuboring.",
-        "ask_edit_prompt": "✍️ Nima o'zgartirishni yozing.",
-        "ask_reedit_prompt": "✍️ Yana nima o'zgartiramiz?",
-        "ask_video": "✍️ Video uchun matn yozing (5 soniya, 1080p).",
-        "processing": "⏳ Tayyorlayapman... 1-3 daqiqa ketishi mumkin.",
-        "done": "✅ Tayyor.",
-        "cancelled": "❌ Bekor qilindi.",
-        "no_last_image": "⚠️ Oxirgi rasm yo'q.",
-        "video_disabled": "🎬 Video hozircha ulanmagan.",
-        "billing_limit": "⚠️ OpenAI xatolik: billing limiti tugagan.",
-        "choose_pack": "Kredit paketini tanlang:",
-        "pay_title": "Kredit paketi",
-        "pay_desc": "Bot balansini to'ldirish.",
-        "paid_ok": "✅ To'lov o'tdi! +{add} kredit. Balans: {credits}.",
-        "unknown_text": "⭐ Yulduzlarni @litencyy dan sotib oling yoki menyudan tanlang.",
-        "lang_set": "🌐 Til: O'zbekcha",
+        "welcome": (
+            "Assalomu alaykum! Bu <b>EYUF</b> boti.\n\n"
+            "Tilni tanlang / Выберите язык / Select language:"
+        ),
+        "lang_selected": (
+            "O'zbek tili tanlandi 🇺🇿\n\n"
+            "Anketani to'ldirish uchun pastdagi tugmani bosing."
+        ),
+        "btn_fill": "📝 Anketani to'ldirish",
+        "btn_change_lang": "🌐 Tilni o'zgartirish",
+        "btn_pending": "📋 Javob berilmagan anketalar",
+        "fill_instructions": (
+            "Pastroqdagi shablonni nusxalang (nusxalash uchun ustiga bosing), "
+            "ikki nuqtadan so'ng barcha punktlarni to'ldiring va <b>bitta xabar bilan</b> yuboring:\n\n"
+            "{template}\n\n"
+            "To'ldirilgan qatorga misol:\n"
+            "<code>Full Name: John Michael Smith</code>"
+        ),
+        "not_text": "Iltimos, anketani yuqoridagi shablondan foydalanib matn ko'rinishida yuboring.",
+        "missing_fields": (
+            "❗ Barcha punktlar to'ldirilmagan. Yetishmayapti:\n\n"
+            "{missing_text}\n\n"
+            "Shablonni qayta nusxalang, barcha punktlarni to'ldiring va bitta xabar bilan yuboring:\n\n"
+            "{template}"
+        ),
+        "prompt_university": "🏛️ Ajoyib! Endi <b>universitet nomini</b> kiriting (University):",
+        "prompt_offer_letter": "📄 Iltimos, <b>Offer Letter</b> hujjatini yuboring (fayl ko'rinishida):",
+        "not_a_document": "⚠️ Iltimos, Offer Letter hujjatini fayl shaklida yuboring.",
+        "app_submitted": (
+            "✅ <b>Anketa muvaffaqiyatli yuborildi!</b>\n\n"
+            "Iltimos, administrator javobini kuting. "
+            "Admin javob bergandan so'ng xabar yuborishingiz mumkin bo'ladi."
+        ),
+        "wait_for_admin": "⏳ Anketangiz ko'rib chiqilmoqda. Iltimos, administrator javobini kuting.",
+        "doc_received_caption": (
+            "📄 <b>Sizning hujjatingiz</b>\n\n"
+            "Hujjat administrator tomonidan yuborildi."
+        ),
+        "msg_received_prefix": "💬 <b>Administratordan xabar:</b>\n\n",
+        "btn_send_file": "📄 Fayl yuborish",
+        "btn_send_msg": "💬 Xabar yuborish",
+        "admin_prompt_file": (
+            "📎 Endi bu yerga <b>faylni</b> yuboring.\n\n"
+            "Qabul qiluvchi: <b>{name}</b>\n"
+            "Telegram ID: <code>{tg_id}</code>\n\n"
+            "Bekor qilish uchun: /cancel"
+        ),
+        "admin_prompt_msg": (
+            "💬 Foydalanuvchi uchun <b>matnli xabarni</b> kiriting.\n\n"
+            "Qabul qiluvchi: <b>{name}</b>\n"
+            "Telegram ID: <code>{tg_id}</code>\n\n"
+            "Bekor qilish uchun: /cancel"
+        ),
+        "file_sent_success": "✅ Fayl foydalanuvchiga muvaffaqiyatli yuborildi.",
+        "file_sent_error": "❌ Faylni foydalanuvchiga yuborib bo'lmaydi.",
+        "msg_sent_success": "✅ Xabar foydalanuvchiga muvaffaqiyatli yuborildi.",
+        "msg_sent_error": "❌ Xabarni foydalanuvchiga yuborib bo'lmaydi.",
+        "cancelled": "Operatsiya bekor qilindi.",
+        "pending_empty": "🎉 Barcha anketalar ko'rib chiqildi! Javob berilmaganlar yo'q.",
+        "pending_title": "📋 <b>Javob berilmagan anketalar ro'yxati ({count}):</b>",
+        "app_card_title": "📥 <b>JAVOB BERILMAGAN ANKETA №{app_id}</b>"
     },
+    "en": {
+        "welcome": (
+            "Hello! This is the <b>EYUF</b> bot.\n\n"
+            "Select language / Выберите язык / Tilni tanlang:"
+        ),
+        "lang_selected": (
+            "English language selected 🇬🇧\n\n"
+            "Click the button below to fill out the application."
+        ),
+        "btn_fill": "📝 Fill out application",
+        "btn_change_lang": "🌐 Change language",
+        "btn_pending": "📋 Pending applications",
+        "fill_instructions": (
+            "Copy the template below (tap on it to copy), "
+            "fill in all fields after the colon, and send as a <b>single message</b>:\n\n"
+            "{template}\n\n"
+            "Example of a filled line:\n"
+            "<code>Full Name: John Michael Smith</code>"
+        ),
+        "not_text": "Please send the application as text using the template above.",
+        "missing_fields": (
+            "❗ Not all fields are filled. Missing:\n\n"
+            "{missing_text}\n\n"
+            "Copy the template again, fill in all fields after the colon, and send as a single message:\n\n"
+            "{template}"
+        ),
+        "prompt_university": "🏛️ Great! Now enter the <b>University name</b>:",
+        "prompt_offer_letter": "📄 Please send your <b>Offer Letter</b> (as a document/file):",
+        "not_a_document": "⚠️ Please send the Offer Letter as a file/document.",
+        "app_submitted": (
+            "✅ <b>Application successfully submitted!</b>\n\n"
+            "Please wait for an administrator's response. "
+            "You will be able to send messages after the admin replies to you."
+        ),
+        "wait_for_admin": "⏳ Your application is under review. Please wait for an administrator's response.",
+        "doc_received_caption": (
+            "📄 <b>Your document</b>\n\n"
+            "The document was sent by the administrator."
+        ),
+        "msg_received_prefix": "💬 <b>Message from administrator:</b>\n\n",
+        "btn_send_file": "📄 Send file",
+        "btn_send_msg": "💬 Send message",
+        "admin_prompt_file": (
+            "📎 Now send the <b>file</b> here.\n\n"
+            "Recipient: <b>{name}</b>\n"
+            "Telegram ID: <code>{tg_id}</code>\n\n"
+            "To cancel: /cancel"
+        ),
+        "admin_prompt_msg": (
+            "💬 Enter a <b>text message</b> for the user.\n\n"
+            "Recipient: <b>{name}</b>\n"
+            "Telegram ID: <code>{tg_id}</code>\n\n"
+            "To cancel: /cancel"
+        ),
+        "file_sent_success": "✅ File successfully sent to the user.",
+        "file_sent_error": "❌ Failed to send file to the user.",
+        "msg_sent_success": "✅ Message successfully sent to the user.",
+        "msg_sent_error": "❌ Failed to send message to the user.",
+        "cancelled": "Operation cancelled.",
+        "pending_empty": "🎉 All applications have been processed! No pending ones.",
+        "pending_title": "📋 <b>List of pending applications ({count}):</b>",
+        "app_card_title": "📥 <b>PENDING APPLICATION №{app_id}</b>"
+    }
 }
 
-BTN = {
-    "ru": {
-        "gen": "🎨 Генерация",
-        "edit": "🖼 Редактирование",
-        "reedit": "🔄 Повторная правка",
-        "video": "🎬 Видео",
-        "bal": "💳 Баланс",
-        "help": "ℹ️ Помощь",
-        "lang": "🌐 Язык",
-        "cancel": "❌ Отмена",
-    },
-    "uz": {
-        "gen": "🎨 Generatsiya",
-        "edit": "🖼 Tahrirlash",
-        "reedit": "🔄 Qayta tahrir",
-        "video": "🎬 Video",
-        "bal": "💳 Balans",
-        "help": "ℹ️ Yordam",
-        "lang": "🌐 Til",
-        "cancel": "❌ Bekor qilish",
-    },
+FILL_BTNS = [LOCALES[l]["btn_fill"] for l in LOCALES]
+LANG_BTNS = [LOCALES[l]["btn_change_lang"] for l in LOCALES]
+PENDING_BTNS = [LOCALES[l]["btn_pending"] for l in LOCALES]
+
+# ============================================================
+# 1. НАСТРОЙКИ И ИНИЦИАЛИЗАЦИЯ
+# ============================================================
+
+BOT_TOKEN = "8946151948:AAG_RhZv-UOpHp5xi7vF5MN35GyCP-QIaj8"
+
+ADMIN_IDS = {
+    5039871861,
+7678209331,
 }
 
-
-def tr(lang, key, **kwargs):
-    lang = lang if lang in T else "ru"
-    return T[lang].get(key, key).format(**kwargs)
-
-def menu_kb(lang):
-    b = BTN[lang]
-    return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text=b["gen"]),    KeyboardButton(text=b["edit"])],
-        [KeyboardButton(text=b["reedit"]), KeyboardButton(text=b["video"])],
-        [KeyboardButton(text=b["bal"]),    KeyboardButton(text=b["help"])],
-        [KeyboardButton(text=b["lang"]),   KeyboardButton(text=b["cancel"])],
-    ], resize_keyboard=True)
-
-def lang_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Русский 🇷🇺", callback_data="lang:ru"),
-        InlineKeyboardButton(text="O'zbek 🇺🇿",  callback_data="lang:uz"),
-    ]])
-
-def buy_kb(lang):
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=tr(lang, "buy"), callback_data="buy:menu")
-    ]])
-
-def packs():
-    return [("pack10", 10, 50), ("pack20", 20, 100), ("pack30", 30, 150)]
-
-def packs_kb(lang):
-    ru = lang == "ru"
-    rows = []
-    for pid, cr, stars in packs():
-        label = f"⭐ {stars} Stars → +{cr} кредитов" if ru else f"⭐ {stars} Stars → +{cr} kredit"
-        rows.append([InlineKeyboardButton(text=label, callback_data=f"buy:{pid}")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-DB_PATH = "bot.db"
-conn = sqlite3.connect(DB_PATH)
-conn.execute(
-    "CREATE TABLE IF NOT EXISTS users ("
-    "user_id INTEGER PRIMARY KEY,"
-    "lang TEXT DEFAULT 'ru',"
-    "credits INTEGER DEFAULT 0,"
-    "last_image_file_id TEXT DEFAULT NULL,"
-    "tmp_image_file_id TEXT DEFAULT NULL,"
-    "created_at INTEGER DEFAULT (strftime('%s','now')))"
-)
-conn.commit()
-
-def db_get_user(uid):
-    row = conn.execute(
-        "SELECT user_id,lang,credits,last_image_file_id,tmp_image_file_id FROM users WHERE user_id=?",
-        (uid,)
-    ).fetchone()
-    if not row:
-        conn.execute("INSERT INTO users(user_id,lang,credits) VALUES(?,?,?)", (uid,"ru",0))
-        conn.commit()
-        return {"user_id":uid,"lang":"ru","credits":0,"last_image_file_id":None,"tmp_image_file_id":None}
-    return {"user_id":row[0],"lang":row[1],"credits":row[2],"last_image_file_id":row[3],"tmp_image_file_id":row[4]}
-
-def db_set_lang(uid, lang):
-    conn.execute("UPDATE users SET lang=? WHERE user_id=?", (lang,uid)); conn.commit()
-def db_add_credits(uid, add):
-    conn.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (add,uid)); conn.commit()
-    return db_get_user(uid)["credits"]
-def db_take_credits(uid, take):
-    conn.execute("UPDATE users SET credits=MAX(credits-?,0) WHERE user_id=?", (take,uid)); conn.commit()
-def db_set_last_image(uid, fid):
-    conn.execute("UPDATE users SET last_image_file_id=? WHERE user_id=?", (fid,uid)); conn.commit()
-def db_set_tmp_image(uid, fid):
-    conn.execute("UPDATE users SET tmp_image_file_id=? WHERE user_id=?", (fid,uid)); conn.commit()
-
-class S(StatesGroup):
-    GEN_PROMPT      = State()
-    EDIT_WAIT_PHOTO = State()
-    EDIT_PROMPT     = State()
-    REEDIT_PROMPT   = State()
-    VIDEO_PROMPT    = State()
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-user_locks: dict = {}
-
-def get_lock(uid):
-    if uid not in user_locks:
-        user_locks[uid] = asyncio.Lock()
-    return user_locks[uid]
-
-async def tg_file_bytes(bot, file_id):
-    f = await bot.get_file(file_id)
-    buf = BytesIO()
-    await bot.download_file(f.file_path, buf)
-    return buf.getvalue()
-
-def _tmp(data, ext=".png"):
-    fd, path = tempfile.mkstemp(suffix=ext)
-    os.close(fd)
-    open(path,"wb").write(data)
-    return path
-
-async def openai_gen_image(prompt):
-    res = await asyncio.to_thread(client.images.generate, model=IMAGE_MODEL, prompt=prompt, size=IMAGE_SIZE)
-    return base64.b64decode(res.data[0].b64_json)
-
-async def openai_edit_image(img_bytes, prompt):
-    path = _tmp(img_bytes)
-    try:
-        with open(path,"rb") as img:
-            res = await asyncio.to_thread(client.images.edit, model=IMAGE_MODEL, image=img, prompt=prompt, size=IMAGE_SIZE)
-        return base64.b64decode(res.data[0].b64_json)
-    finally:
-        try: os.remove(path)
-        except: pass
-
-async def replicate_gen_video(prompt):
-    hdrs = {"Authorization": f"Bearer {REPLICATE_API_KEY}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=300.0) as h:
-        r = await h.post(
-            "https://api.replicate.com/v1/models/klingai/kling-video/predictions",
-            headers=hdrs,
-            json={"input": {"prompt": prompt, "duration": 5, "aspect_ratio": "16:9"}},
-        )
-        r.raise_for_status()
-        pred_id = r.json()["id"]
-        for _ in range(150):
-            rr = await h.get(f"https://api.replicate.com/v1/predictions/{pred_id}",
-                             headers={"Authorization": f"Bearer {REPLICATE_API_KEY}"})
-            rr.raise_for_status()
-            d = rr.json()
-            if d.get("status") == "succeeded":
-                url = d["output"]
-                if isinstance(url, list): url = url[0]
-                rc = await h.get(url); rc.raise_for_status()
-                return rc.content
-            if d.get("status") == "failed":
-                raise RuntimeError(f"Video failed: {d.get('error','?')}")
-            await asyncio.sleep(3.0)
-    raise RuntimeError("Video timeout")
-
-async def has_credits(uid, need):
-    u = db_get_user(uid)
-    return u["credits"] >= need, u["credits"]
-
-def is_cancel(t):
-    return bool(t) and t.strip() in (BTN["ru"]["cancel"], BTN["uz"]["cancel"])
-def is_btn(key, t):
-    return bool(t) and t.strip() in (BTN["ru"][key], BTN["uz"][key])
+DATABASE = "applications.db"
 
 logging.basicConfig(level=logging.INFO)
-bot = Bot(BOT_TOKEN)
-dp  = Dispatcher(storage=MemoryStorage())
-r   = Router()
-dp.include_router(r)
 
-@r.message(CommandStart())
-async def cmd_start(m: Message):
-    u = db_get_user(m.from_user.id)
-    await m.answer(tr(u["lang"], "welcome"))
-    await m.answer(tr(u["lang"], "choose_lang"), reply_markup=lang_kb())
-    await m.answer(tr(u["lang"], "menu"), reply_markup=menu_kb(u["lang"]))
+session = AiohttpSession(proxy="http://proxy.server:3128")
+bot = Bot(token=BOT_TOKEN, session=session)
 
-@r.message(Command("info"))
-async def cmd_info(m: Message):
-    u = db_get_user(m.from_user.id)
-    await m.answer(tr(u["lang"], "info"), reply_markup=packs_kb(u["lang"]))
+dp = Dispatcher()
 
-@r.message(Command("menu"))
-async def cmd_menu(m: Message):
-    u = db_get_user(m.from_user.id)
-    await m.answer(tr(u["lang"], "menu"), reply_markup=menu_kb(u["lang"]))
+# ============================================================
+# 2. СОСТОЯНИЯ
+# ============================================================
 
-@r.message(Command("balance"))
-async def cmd_balance(m: Message):
-    u = db_get_user(m.from_user.id)
-    await m.answer(tr(u["lang"], "balance", credits=u["credits"]), reply_markup=buy_kb(u["lang"]))
+class ApplicationForm(StatesGroup):
+    waiting_for_submission = State()
+    waiting_for_university = State()
+    waiting_for_offer_letter = State()
+    waiting_for_admin_reply = State()
 
-@r.callback_query(F.data.startswith("lang:"))
-async def cb_set_lang(cb: CallbackQuery):
-    lang = cb.data.split(":")[1]
-    if lang not in ("ru","uz"): lang = "ru"
-    db_set_lang(cb.from_user.id, lang)
+
+class AdminStates(StatesGroup):
+    waiting_for_file = State()
+    waiting_for_message = State()
+
+# ============================================================
+# 3. DATABASE
+# ============================================================
+
+async def init_db():
+    async with aiosqlite.connect(DATABASE) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                telegram_id INTEGER PRIMARY KEY,
+                language TEXT DEFAULT 'ru'
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS applications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                username TEXT,
+                full_name TEXT NOT NULL,
+                passport TEXT NOT NULL,
+                student_id TEXT NOT NULL,
+                date_of_birth TEXT NOT NULL,
+                university TEXT NOT NULL,
+                program_major TEXT NOT NULL,
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                mode_of_study TEXT NOT NULL,
+                offer_file_id TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        try:
+            await db.execute("ALTER TABLE applications ADD COLUMN offer_file_id TEXT")
+        except Exception:
+            pass
+        await db.commit()
+
+
+async def set_user_language(telegram_id: int, lang: str):
+    async with aiosqlite.connect(DATABASE) as db:
+        await db.execute("""
+            INSERT INTO users (telegram_id, language)
+            VALUES (?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET language=excluded.language
+        """, (telegram_id, lang))
+        await db.commit()
+
+
+async def get_user_language(telegram_id: int) -> str:
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("SELECT language FROM users WHERE telegram_id = ?", (telegram_id,))
+        row = await cursor.fetchone()
+        return row[0] if row else "ru"
+
+
+async def save_application(user_id, username, data):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("""
+            INSERT INTO applications (
+                telegram_id, username, full_name, passport, student_id,
+                date_of_birth, university, program_major, start_date,
+                end_date, mode_of_study, offer_file_id, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+        """, (
+            user_id, username, data["full_name"], data["passport"],
+            data["student_id"], data["date_of_birth"], data["university"],
+            data["program_major"], data["start_date"], data["end_date"],
+            data["mode_of_study"], data.get("offer_file_id")
+        ))
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def mark_application_answered(application_id: int):
+    async with aiosqlite.connect(DATABASE) as db:
+        await db.execute("UPDATE applications SET status = 'answered' WHERE id = ?", (application_id,))
+        await db.commit()
+
+
+async def get_pending_applications():
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("""
+            SELECT id, telegram_id, username, full_name, passport, student_id,
+                   date_of_birth, university, program_major, start_date,
+                   end_date, mode_of_study, offer_file_id, created_at
+            FROM applications
+            WHERE status = 'pending'
+            ORDER BY id DESC
+        """)
+        return await cursor.fetchall()
+
+
+async def get_application(application_id: int):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("""
+            SELECT telegram_id, full_name
+            FROM applications
+            WHERE id = ?
+        """, (application_id,))
+        return await cursor.fetchone()
+
+
+async def get_latest_application_by_user(telegram_id: int):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("""
+            SELECT id, full_name FROM applications 
+            WHERE telegram_id = ? 
+            ORDER BY id DESC LIMIT 1
+        """, (telegram_id,))
+        return await cursor.fetchone()
+
+# ============================================================
+# 4. ШАБЛОН И ПАРСИНГ
+# ============================================================
+
+FIELD_ORDER = [
+    "full_name", "passport", "student_id", "date_of_birth",
+    "program_major", "start_date", "end_date", "mode_of_study"
+]
+
+FIELD_LABELS = {
+    "full_name": "Full Name",
+    "passport": "Passport",
+    "student_id": "Student ID",
+    "date_of_birth": "Date of birth",
+    "program_major": "Program and Major",
+    "start_date": "Start date",
+    "end_date": "End date",
+    "mode_of_study": "Mode of study",
+}
+
+LABEL_TO_FIELD = {label.strip().lower(): field for field, label in FIELD_LABELS.items()}
+
+
+def application_template() -> str:
+    lines = "\n".join(f"{FIELD_LABELS[f]}: " for f in FIELD_ORDER)
+    return f"<pre>{lines}</pre>"
+
+
+def parse_application(text: str):
+    data = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        label, _, value = line.partition(":")
+        label_norm = label.strip().lower()
+        value = value.strip()
+
+        field = LABEL_TO_FIELD.get(label_norm)
+        if field and value:
+            data[field] = value
+
+    missing = [f for f in FIELD_ORDER if f not in data]
+    return data, missing
+
+# ============================================================
+# 5. КНОПКИ
+# ============================================================
+
+def lang_choice_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="set_lang:ru"),
+                InlineKeyboardButton(text="🇺🇿 O'zbekcha", callback_data="set_lang:uz"),
+                InlineKeyboardButton(text="🇬🇧 English", callback_data="set_lang:en"),
+            ]
+        ]
+    )
+
+
+def main_keyboard(lang: str = "ru", is_admin: bool = False):
+    texts = LOCALES.get(lang, LOCALES["ru"])
+    keyboard_buttons = []
+    
+    if is_admin:
+        keyboard_buttons.append([KeyboardButton(text=texts["btn_pending"])])
+        
+    keyboard_buttons.append([KeyboardButton(text=texts["btn_fill"])])
+    keyboard_buttons.append([KeyboardButton(text=texts["btn_change_lang"])])
+
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard_buttons,
+        resize_keyboard=True
+    )
+
+
+def admin_keyboard(application_id: int, lang: str = "ru"):
+    texts = LOCALES.get(lang, LOCALES["ru"])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=texts["btn_send_file"], callback_data=f"sendfile:{application_id}"),
+                InlineKeyboardButton(text=texts["btn_send_msg"], callback_data=f"sendmsg:{application_id}")
+            ]
+        ]
+    )
+
+answered_keyboard = InlineKeyboardMarkup(
+    inline_keyboard=[[InlineKeyboardButton(text="✅ Отвечено", callback_data="already_answered")]]
+)
+
+# ============================================================
+# 6. КОМАНДЫ (START, LANG, PENDING, SEND)
+# ============================================================
+
+@dp.message(Command("start"))
+async def start(message: Message, state: FSMContext):
+    await state.clear()
+    lang = await get_user_language(message.from_user.id)
+    texts = LOCALES[lang]
+
+    await message.answer(
+        texts["welcome"],
+        reply_markup=lang_choice_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data.startswith("set_lang:"))
+async def process_language_choice(callback: CallbackQuery):
+    lang = callback.data.split(":")[1]
+    if lang not in LOCALES:
+        lang = "ru"
+
+    await set_user_language(callback.from_user.id, lang)
+    texts = LOCALES[lang]
+
+    is_admin = callback.from_user.id in ADMIN_IDS
+
     try:
-        await cb.answer()
+        await callback.message.delete()
     except Exception:
         pass
-    await cb.message.answer(tr(lang, "lang_set"), reply_markup=menu_kb(lang))
 
-@r.callback_query(F.data.startswith("buy:"))
-async def cb_buy(cb: CallbackQuery):
-    u = db_get_user(cb.from_user.id); lang = u["lang"]
-    kind = cb.data.split(":",1)[1]
-    try:
-        await cb.answer()
-    except Exception:
-        pass
-    if kind == "menu":
-        await cb.message.answer(tr(lang,"choose_pack"), reply_markup=packs_kb(lang)); return
-    sel = next(((p,c,s) for p,c,s in packs() if p==kind), None)
-    if not sel:
+    await callback.message.answer(
+        texts["lang_selected"],
+        parse_mode="HTML",
+        reply_markup=main_keyboard(lang, is_admin=is_admin)
+    )
+    await callback.answer()
+
+
+@dp.message(F.text.in_(LANG_BTNS))
+async def change_language(message: Message, state: FSMContext):
+    await state.clear()
+    lang = await get_user_language(message.from_user.id)
+    texts = LOCALES[lang]
+
+    await message.answer(
+        texts["welcome"],
+        reply_markup=lang_choice_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+@dp.message(Command("pending"))
+@dp.message(F.text.in_(PENDING_BTNS))
+async def show_pending_applications(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
         return
-    pid, credits, stars = sel
-    try:
-        await bot.send_invoice(
-            chat_id=cb.from_user.id,
-            title=tr(lang,"pay_title"), description=tr(lang,"pay_desc"),
-            payload=f"credits:{credits}", provider_token="", currency="XTR",
-            prices=[LabeledPrice(label=f"+{credits} credits", amount=stars)],
+
+    admin_lang = await get_user_language(message.from_user.id)
+    texts = LOCALES[admin_lang]
+
+    pending = await get_pending_applications()
+    if not pending:
+        await message.answer(texts["pending_empty"])
+        return
+
+    await message.answer(texts["pending_title"].format(count=len(pending)), parse_mode="HTML")
+    
+    for row in pending:
+        (app_id, tg_id, username, full_name, passport, student_id,
+         date_of_birth, university, program_major, start_date,
+         end_date, mode_of_study, offer_file_id, created_at) = row
+
+        username_text = f"@{username}" if username else "нет/no"
+        card_title = texts["app_card_title"].format(app_id=app_id)
+
+        msg = (
+            f"{card_title}\n\n"
+            f"🆔 Application ID: <code>{app_id}</code>\n"
+            f"👤 Telegram ID: <code>{tg_id}</code>\n"
+            f"🔗 Username: {username_text}\n"
+            f"📅 Date: {created_at}\n\n"
+            f"<b>Full Name:</b> {full_name}\n"
+            f"<b>Passport:</b> {passport}\n"
+            f"<b>Student ID:</b> {student_id}\n"
+            f"<b>Date of birth:</b> {date_of_birth}\n"
+            f"<b>University:</b> {university}\n"
+            f"<b>Program and Major:</b> {program_major}\n"
+            f"<b>Start date:</b> {start_date}\n"
+            f"<b>End date:</b> {end_date}\n"
+            f"<b>Mode of study:</b> {mode_of_study}"
         )
+
+        if offer_file_id:
+            await message.answer_document(
+                document=offer_file_id,
+                caption=msg,
+                parse_mode="HTML",
+                reply_markup=admin_keyboard(app_id, lang=admin_lang)
+            )
+        else:
+            await message.answer(msg, parse_mode="HTML", reply_markup=admin_keyboard(app_id, lang=admin_lang))
+
+
+@dp.message(Command("send"))
+async def cmd_send_direct(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        await message.answer("⚠️ Использование: <code>/send &lt;ID&gt; &lt;текст&gt;</code>", parse_mode="HTML")
+        return
+
+    target_id_str = args[1]
+    text_to_send = args[2]
+
+    try:
+        target_id = int(target_id_str)
+    except ValueError:
+        await message.answer("❌ ID должен быть числом.")
+        return
+
+    target_user_id = target_id
+    app = await get_application(target_id)
+    if app:
+        target_user_id = app[0]
+        await mark_application_answered(target_id)
+
+    user_lang = await get_user_language(target_user_id)
+    prefix = LOCALES[user_lang]["msg_received_prefix"]
+
+    try:
+        await bot.send_message(chat_id=target_user_id, text=f"{prefix}{text_to_send}", parse_mode="HTML")
+        await message.answer(f"✅ Сообщение отправлено пользователю <code>{target_user_id}</code>.", parse_mode="HTML")
     except Exception as e:
-        await cb.message.answer(f"Ошибка оплаты: {e}")
+        await message.answer(f"❌ Ошибка: {e}", parse_mode="HTML")
 
-@r.pre_checkout_query()
-async def pre_checkout(q: PreCheckoutQuery):
-    await bot.answer_pre_checkout_query(q.id, ok=True)
+# ============================================================
+# 7. АНКЕТИРОВАНИЕ (ПОШАГОВОЕ С УНИВЕРСИТЕТОМ И OFFER LETTER)
+# ============================================================
 
-@r.message(F.successful_payment)
-async def on_payment(m: Message):
-    u = db_get_user(m.from_user.id); lang = u["lang"]
-    add = 0
-    p = m.successful_payment.invoice_payload or ""
-    if p.startswith("credits:"):
-        try: add = int(p.split(":",1)[1])
-        except: pass
-    if add:
-        cr = db_add_credits(m.from_user.id, add)
-        await m.answer(tr(lang,"paid_ok", add=add, credits=cr), reply_markup=menu_kb(lang))
-    else:
-        await m.answer(tr(lang,"done"), reply_markup=menu_kb(lang))
+@dp.message(F.text.in_(FILL_BTNS))
+async def start_application(message: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(ApplicationForm.waiting_for_submission)
 
-@r.message(F.text)
-async def on_text(m: Message, state: FSMContext):
-    u = db_get_user(m.from_user.id); lang = u["lang"]; txt = m.text.strip()
-    if is_cancel(txt):
-        await state.clear(); db_set_tmp_image(m.from_user.id, None)
-        await m.answer(tr(lang,"cancelled"), reply_markup=menu_kb(lang)); return
-    if is_btn("lang", txt):
-        await m.answer(tr(lang,"choose_lang"), reply_markup=lang_kb()); return
-    if is_btn("help", txt):
-        await m.answer(tr(lang,"help"), reply_markup=menu_kb(lang)); return
-    if is_btn("bal", txt):
-        u = db_get_user(m.from_user.id)
-        await m.answer(tr(lang,"balance", credits=u["credits"]), reply_markup=packs_kb(lang)); return
-    if is_btn("gen", txt):
-        await state.set_state(S.GEN_PROMPT); await m.answer(tr(lang,"ask_gen")); return
-    if is_btn("edit", txt):
-        await state.set_state(S.EDIT_WAIT_PHOTO); await m.answer(tr(lang,"ask_edit_photo")); return
-    if is_btn("reedit", txt):
-        if not u["last_image_file_id"]:
-            await m.answer(tr(lang,"no_last_image")); return
-        await state.set_state(S.REEDIT_PROMPT); await m.answer(tr(lang,"ask_reedit_prompt")); return
-    if is_btn("video", txt):
-        await state.set_state(S.VIDEO_PROMPT); await m.answer(tr(lang,"ask_video")); return
-    await m.answer(tr(lang,"unknown_text"), reply_markup=menu_kb(lang))
+    lang = await get_user_language(message.from_user.id)
+    texts = LOCALES[lang]
 
-@r.message(S.GEN_PROMPT, F.text)
-async def do_gen(m: Message, state: FSMContext):
-    u = db_get_user(m.from_user.id); lang = u["lang"]
-    ok, have = await has_credits(m.from_user.id, COST_IMAGE_GEN)
-    if not ok:
-        await m.answer(tr(lang,"not_enough", need=COST_IMAGE_GEN, have=have), reply_markup=packs_kb(lang)); return
-    async with get_lock(m.from_user.id):
-        await m.answer(tr(lang,"processing"))
+    await message.answer(
+        texts["fill_instructions"].format(template=application_template()),
+        parse_mode="HTML"
+    )
+
+
+@dp.message(ApplicationForm.waiting_for_submission)
+async def process_application_text(message: Message, state: FSMContext):
+    lang = await get_user_language(message.from_user.id)
+    texts = LOCALES[lang]
+
+    if not message.text:
+        await message.answer(texts["not_text"])
+        return
+
+    data, missing = parse_application(message.text)
+
+    if missing:
+        missing_text = "\n".join(f"• {FIELD_LABELS[f]}" for f in missing)
+        await message.answer(
+            texts["missing_fields"].format(missing_text=missing_text, template=application_template()),
+            parse_mode="HTML"
+        )
+        return
+
+    await state.update_data(app_data=data)
+    await state.set_state(ApplicationForm.waiting_for_university)
+    await message.answer(texts["prompt_university"], parse_mode="HTML")
+
+
+@dp.message(ApplicationForm.waiting_for_university)
+async def process_university(message: Message, state: FSMContext):
+    lang = await get_user_language(message.from_user.id)
+    texts = LOCALES[lang]
+
+    if not message.text:
+        await message.answer("Пожалуйста, введите название университета текстом.")
+        return
+
+    user_data = await state.get_data()
+    app_data = user_data.get("app_data", {})
+    app_data["university"] = message.text.strip()
+
+    await state.update_data(app_data=app_data)
+    await state.set_state(ApplicationForm.waiting_for_offer_letter)
+    await message.answer(texts["prompt_offer_letter"], parse_mode="HTML")
+
+
+@dp.message(ApplicationForm.waiting_for_offer_letter)
+async def process_offer_letter(message: Message, state: FSMContext):
+    lang = await get_user_language(message.from_user.id)
+    texts = LOCALES[lang]
+
+    if not message.document:
+        await message.answer(texts["not_a_document"])
+        return
+
+    user_data = await state.get_data()
+    app_data = user_data.get("app_data", {})
+    app_data["offer_file_id"] = message.document.file_id
+
+    user_id = message.from_user.id
+    username = message.from_user.username
+
+    application_id = await save_application(user_id, username, app_data)
+    await message.answer(texts["app_submitted"], parse_mode="HTML")
+
+    await state.set_state(ApplicationForm.waiting_for_admin_reply)
+
+    username_text = f"@{username}" if username else "нет username"
+
+    admin_text = (
+        "📥 <b>НОВАЯ АНКЕТА</b>\n\n"
+        f"🆔 Application ID: <code>{application_id}</code>\n"
+        f"👤 Telegram ID: <code>{user_id}</code>\n"
+        f"🌐 Язык: <b>{lang.upper()}</b>\n"
+        f"🔗 Username: {username_text}\n\n"
+        f"<b>Full Name:</b> {app_data['full_name']}\n"
+        f"<b>Passport:</b> {app_data['passport']}\n"
+        f"<b>Student ID:</b> {app_data['student_id']}\n"
+        f"<b>Date of birth:</b> {app_data['date_of_birth']}\n"
+        f"<b>University:</b> {app_data['university']}\n"
+        f"<b>Program and Major:</b> {app_data['program_major']}\n"
+        f"<b>Start date:</b> {app_data['start_date']}\n"
+        f"<b>End date:</b> {app_data['end_date']}\n"
+        f"<b>Mode of study:</b> {app_data['mode_of_study']}"
+    )
+
+    for admin_id in ADMIN_IDS:
         try:
-            data = await openai_gen_image(m.text.strip())
+            admin_lang = await get_user_language(admin_id)
+            await bot.send_document(
+                chat_id=admin_id,
+                document=message.document.file_id,
+                caption=admin_text,
+                parse_mode="HTML",
+                reply_markup=admin_keyboard(application_id, lang=admin_lang)
+            )
         except Exception as e:
-            s = str(e)
-            await m.answer(tr(lang,"billing_limit") if "billing" in s.lower() else f"Error: {s}", reply_markup=menu_kb(lang)); return
-        db_take_credits(m.from_user.id, COST_IMAGE_GEN)
-        sent = await m.answer_photo(BufferedInputFile(data,"image.png"), caption=tr(lang,"done"), reply_markup=menu_kb(lang))
-        try: db_set_last_image(m.from_user.id, sent.photo[-1].file_id)
-        except: pass
+            logging.error("Ошибка отправки админу %s: %s", admin_id, e)
+
+
+@dp.message(ApplicationForm.waiting_for_admin_reply)
+async def block_user_spam(message: Message):
+    lang = await get_user_language(message.from_user.id)
+    await message.answer(LOCALES[lang]["wait_for_admin"])
+
+# ============================================================
+# 8. ОБРАБОТКА ДЕЙСТВИЙ АДМИНА
+# ============================================================
+
+@dp.callback_query(F.data.startswith("sendfile:"))
+async def admin_send_file_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("У вас нет доступа / Access denied.", show_alert=True)
+        return
+
+    application_id = int(callback.data.split(":")[1])
+    application = await get_application(application_id)
+
+    if application is None:
+        await callback.answer("Анкета не найдена / Application not found.", show_alert=True)
+        return
+
+    telegram_id, full_name = application
+
+    await state.update_data(
+        target_user_id=telegram_id,
+        application_id=application_id,
+        target_name=full_name,
+        message_id=callback.message.message_id,
+        chat_id=callback.message.chat.id
+    )
+    await state.set_state(AdminStates.waiting_for_file)
+
+    admin_lang = await get_user_language(callback.from_user.id)
+    texts = LOCALES[admin_lang]
+
+    await callback.message.answer(
+        texts["admin_prompt_file"].format(name=full_name, tg_id=telegram_id),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("sendmsg:"))
+async def admin_send_msg_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("У вас нет доступа / Access denied.", show_alert=True)
+        return
+
+    application_id = int(callback.data.split(":")[1])
+    application = await get_application(application_id)
+
+    if application is None:
+        await callback.answer("Анкета не найдена / Application not found.", show_alert=True)
+        return
+
+    telegram_id, full_name = application
+
+    await state.update_data(
+        target_user_id=telegram_id,
+        application_id=application_id,
+        target_name=full_name,
+        message_id=callback.message.message_id,
+        chat_id=callback.message.chat.id
+    )
+    await state.set_state(AdminStates.waiting_for_message)
+
+    admin_lang = await get_user_language(callback.from_user.id)
+    texts = LOCALES[admin_lang]
+
+    await callback.message.answer(
+        texts["admin_prompt_msg"].format(name=full_name, tg_id=telegram_id),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.message(StateFilter(AdminStates.waiting_for_file), F.document)
+async def receive_file(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    data = await state.get_data()
+    target_user_id = data["target_user_id"]
+    application_id = data.get("application_id")
+
+    user_lang = await get_user_language(target_user_id)
+    caption = LOCALES[user_lang]["doc_received_caption"]
+
+    admin_lang = await get_user_language(message.from_user.id)
+    admin_texts = LOCALES[admin_lang]
+
+    try:
+        await bot.send_document(
+            chat_id=target_user_id,
+            document=message.document.file_id,
+            caption=caption,
+            parse_mode="HTML"
+        )
+        if application_id:
+            await mark_application_answered(application_id)
+
+        user_state = dp.fsm.get_context(bot=bot, chat_id=target_user_id, user_id=target_user_id)
+        await user_state.clear()
+
+        if "message_id" in data and "chat_id" in data:
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=data["chat_id"],
+                    message_id=data["message_id"],
+                    reply_markup=answered_keyboard
+                )
+            except Exception as e:
+                logging.error("Не удалось обновить кнопки: %s", e)
+
+        await message.answer(admin_texts["file_sent_success"])
+    except Exception as e:
+        logging.error("Ошибка отправки файла: %s", e)
+        await message.answer(admin_texts["file_sent_error"])
+
     await state.clear()
 
-@r.message(S.EDIT_WAIT_PHOTO, F.photo)
-async def got_photo(m: Message, state: FSMContext):
-    db_set_tmp_image(m.from_user.id, m.photo[-1].file_id)
-    await state.set_state(S.EDIT_PROMPT)
-    await m.answer(tr(db_get_user(m.from_user.id)["lang"],"ask_edit_prompt"))
 
-@r.message(S.EDIT_WAIT_PHOTO)
-async def wrong_photo(m: Message):
-    await m.answer(tr(db_get_user(m.from_user.id)["lang"],"ask_edit_photo"))
+@dp.message(StateFilter(AdminStates.waiting_for_message), F.text)
+async def receive_message_for_user(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
 
-@r.message(S.EDIT_PROMPT, F.text)
-async def do_edit(m: Message, state: FSMContext):
-    u = db_get_user(m.from_user.id); lang = u["lang"]
-    if not u["tmp_image_file_id"]:
-        await state.set_state(S.EDIT_WAIT_PHOTO); await m.answer(tr(lang,"ask_edit_photo")); return
-    ok, have = await has_credits(m.from_user.id, COST_IMAGE_EDIT)
-    if not ok:
-        await m.answer(tr(lang,"not_enough", need=COST_IMAGE_EDIT, have=have), reply_markup=packs_kb(lang)); return
-    async with get_lock(m.from_user.id):
-        await m.answer(tr(lang,"processing"))
-        try:
-            raw = await tg_file_bytes(bot, u["tmp_image_file_id"])
-            data = await openai_edit_image(raw, m.text.strip())
-        except Exception as e:
-            s = str(e)
-            await m.answer(tr(lang,"billing_limit") if "billing" in s.lower() else f"Error: {s}", reply_markup=menu_kb(lang)); return
-        db_take_credits(m.from_user.id, COST_IMAGE_EDIT)
-        db_set_tmp_image(m.from_user.id, None)
-        sent = await m.answer_photo(BufferedInputFile(data,"edit.png"), caption=tr(lang,"done"), reply_markup=menu_kb(lang))
-        try: db_set_last_image(m.from_user.id, sent.photo[-1].file_id)
-        except: pass
+    data = await state.get_data()
+    target_user_id = data["target_user_id"]
+    application_id = data.get("application_id")
+
+    user_lang = await get_user_language(target_user_id)
+    prefix = LOCALES[user_lang]["msg_received_prefix"]
+
+    admin_lang = await get_user_language(message.from_user.id)
+    admin_texts = LOCALES[admin_lang]
+
+    try:
+        await bot.send_message(
+            chat_id=target_user_id,
+            text=f"{prefix}{message.text}",
+            parse_mode="HTML"
+        )
+        if application_id:
+            await mark_application_answered(application_id)
+
+        user_state = dp.fsm.get_context(bot=bot, chat_id=target_user_id, user_id=target_user_id)
+        await user_state.clear()
+
+        if "message_id" in data and "chat_id" in data:
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=data["chat_id"],
+                    message_id=data["message_id"],
+                    reply_markup=answered_keyboard
+                )
+            except Exception as e:
+                logging.error("Не удалось обновить кнопки: %s", e)
+
+        await message.answer(admin_texts["msg_sent_success"])
+    except Exception as e:
+        logging.error("Ошибка отправки сообщения: %s", e)
+        await message.answer(admin_texts["msg_sent_error"])
+
     await state.clear()
 
-@r.message(S.REEDIT_PROMPT, F.text)
-async def do_reedit(m: Message, state: FSMContext):
-    u = db_get_user(m.from_user.id); lang = u["lang"]
-    if not u["last_image_file_id"]:
-        await m.answer(tr(lang,"no_last_image"), reply_markup=menu_kb(lang)); await state.clear(); return
-    ok, have = await has_credits(m.from_user.id, COST_IMAGE_EDIT)
-    if not ok:
-        await m.answer(tr(lang,"not_enough", need=COST_IMAGE_EDIT, have=have), reply_markup=packs_kb(lang)); return
-    async with get_lock(m.from_user.id):
-        await m.answer(tr(lang,"processing"))
-        try:
-            raw = await tg_file_bytes(bot, u["last_image_file_id"])
-            data = await openai_edit_image(raw, m.text.strip())
-        except Exception as e:
-            s = str(e)
-            await m.answer(tr(lang,"billing_limit") if "billing" in s.lower() else f"Error: {s}", reply_markup=menu_kb(lang)); return
-        db_take_credits(m.from_user.id, COST_IMAGE_EDIT)
-        sent = await m.answer_photo(BufferedInputFile(data,"reedit.png"), caption=tr(lang,"done"), reply_markup=menu_kb(lang))
-        try: db_set_last_image(m.from_user.id, sent.photo[-1].file_id)
-        except: pass
-    await state.clear()
 
-@r.message(S.VIDEO_PROMPT, F.text)
-async def do_video(m: Message, state: FSMContext):
-    u = db_get_user(m.from_user.id); lang = u["lang"]
-    if not VIDEO_ENABLED or not REPLICATE_API_KEY:
-        await m.answer(tr(lang,"video_disabled"), reply_markup=menu_kb(lang)); await state.clear(); return
-    ok, have = await has_credits(m.from_user.id, COST_VIDEO)
-    if not ok:
-        await m.answer(tr(lang,"not_enough", need=COST_VIDEO, have=have), reply_markup=packs_kb(lang)); return
-    async with get_lock(m.from_user.id):
-        await m.answer(tr(lang,"processing"))
-        try:
-            data = await replicate_gen_video(m.text.strip())
-        except Exception as e:
-            await m.answer(f"Error: {e}", reply_markup=menu_kb(lang)); return
-        db_take_credits(m.from_user.id, COST_VIDEO)
-        await m.answer_video(BufferedInputFile(data,"video.mp4"), caption=tr(lang,"done"), reply_markup=menu_kb(lang))
+@dp.callback_query(F.data == "already_answered")
+async def already_answered_handler(callback: CallbackQuery):
+    await callback.answer("Ответ уже отправлен / Already answered.", show_alert=True)
+
+
+@dp.message(Command("cancel"))
+async def cancel(message: Message, state: FSMContext):
     await state.clear()
+    lang = await get_user_language(message.from_user.id)
+    await message.answer(LOCALES[lang]["cancelled"])
+
+# ============================================================
+# 9. ДВУСТОРОННИЙ ЧАТ
+# ============================================================
+
+@dp.message(F.chat.type == "private", StateFilter(None))
+async def user_chat_forwarder(message: Message, state: FSMContext):
+    if message.from_user.id in ADMIN_IDS:
+        return
+
+    app = await get_latest_application_by_user(message.from_user.id)
+    if not app:
+        return
+
+    app_id, full_name = app
+
+    for admin_id in ADMIN_IDS:
+        try:
+            admin_lang = await get_user_language(admin_id)
+            msg_header = (
+                f"📩 <b>Новое сообщение от пользователя!</b>\n"
+                f"👤 Имя: {full_name}\n"
+                f"🆔 Application ID: <code>{app_id}</code>\n"
+                f"Telegram ID: <code>{message.from_user.id}</code>\n"
+                f"----------------------------"
+            )
+            await bot.send_message(chat_id=admin_id, text=msg_header, parse_mode="HTML")
+            await message.copy_to(chat_id=admin_id, reply_markup=admin_keyboard(app_id, lang=admin_lang))
+        except Exception as e:
+            logging.error("Ошибка при пересылке админу: %s", e)
+
+# ============================================================
+# 10. MAIN
+# ============================================================
 
 async def main():
+    await init_db()
+
+    print("======================================")
+    print("BOT STARTED SUCCESSFULLY")
+    print("======================================")
+
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
