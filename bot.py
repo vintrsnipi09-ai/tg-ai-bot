@@ -1,8 +1,10 @@
 import asyncio
 import logging
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import aiosqlite
 
-from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -231,9 +233,7 @@ DATABASE = "applications.db"
 
 logging.basicConfig(level=logging.INFO)
 
-
 bot = Bot(token=BOT_TOKEN)
-
 dp = Dispatcher()
 
 # ============================================================
@@ -921,8 +921,36 @@ async def user_chat_forwarder(message: Message, state: FSMContext):
 # 10. MAIN
 # ============================================================
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"EYUF Telegram bot is running.")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        # Keep Render logs focused on the Telegram bot.
+        return
+
+
+def start_health_server():
+    port = int(os.environ.get("PORT", "10000"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    logging.info("Health server listening on port %s", port)
+    server.serve_forever()
+
+
 async def main():
     await init_db()
+
+    # Render Web Services require an open HTTP port.
+    # The Telegram bot still uses polling in the main thread.
+    threading.Thread(target=start_health_server, daemon=True).start()
 
     print("======================================")
     print("BOT STARTED SUCCESSFULLY")
