@@ -1,3 +1,0 @@
-@echo off
-cd /d C:\Users\ACER\Desktop\tg.ai.bot
-py bot.py >> bot.log 2>&1
